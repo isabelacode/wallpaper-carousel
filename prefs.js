@@ -9,8 +9,6 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-const N_ = s => s;
-
 // One-way IPC from prefs to shell via the change-trigger int key.
 // Values must match extension.js.
 const TRIGGER_PREV = 1;
@@ -20,15 +18,6 @@ const PREVIEW_WIDTH = 240;
 const PREVIEW_HEIGHT = 150;
 const THUMB_WIDTH = PREVIEW_WIDTH / 2;
 const THUMB_HEIGHT = PREVIEW_HEIGHT / 2;
-
-const INTERVAL_PRESETS = [
-    {seconds:  300, label: N_('5 minutes')},
-    {seconds:  600, label: N_('10 minutes')},
-    {seconds:  900, label: N_('15 minutes')},
-    {seconds: 1800, label: N_('30 minutes')},
-    {seconds: 2700, label: N_('45 minutes')},
-    {seconds: 3600, label: N_('1 hour')},
-];
 
 let _previewCssLoaded = false;
 
@@ -45,19 +34,6 @@ function ensurePreviewCss() {
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     );
     _previewCssLoaded = true;
-}
-
-function findClosestPresetIndex(seconds) {
-    let bestIdx = 0;
-    let bestDelta = Infinity;
-    for (let i = 0; i < INTERVAL_PRESETS.length; i++) {
-        const delta = Math.abs(INTERVAL_PRESETS[i].seconds - seconds);
-        if (delta < bestDelta) {
-            bestDelta = delta;
-            bestIdx = i;
-        }
-    }
-    return bestIdx;
 }
 
 // gnome-shell ExtensionState values (see js/misc/extensionUtils.js upstream).
@@ -274,30 +250,85 @@ export default class CarouselPreferences extends ExtensionPreferences {
 
         group.add(currentRow);
 
-        const stringList = new Gtk.StringList();
-        for (const p of INTERVAL_PRESETS)
-            stringList.append(_(p.label));
+        // Preset intervals (seconds) plus a trailing "Custom…" entry that
+        // reveals the hours/minutes fields below.
+        const presetSeconds = [300, 600, 900, 1800, 2700, 3600];
+        const presetLabels = [
+            _('5 minutes'), _('10 minutes'), _('15 minutes'),
+            _('30 minutes'), _('45 minutes'), _('1 hour'), _('Custom…'),
+        ];
+        const CUSTOM_INDEX = presetSeconds.length;
+
+        const intervalModel = new Gtk.StringList();
+        for (const label of presetLabels)
+            intervalModel.append(label);
 
         const intervalRow = new Adw.ComboRow({
             title: _('Interval'),
-            model: stringList,
+            model: intervalModel,
+        });
+        group.add(intervalRow);
+
+        const customRow = new Adw.ActionRow({
+            title: _('Custom interval'),
+            subtitle: _('Hours and minutes between changes'),
         });
 
-        const initialSeconds = settings.get_int('interval-seconds');
-        const initialIdx = findClosestPresetIndex(initialSeconds);
-        intervalRow.selected = initialIdx;
-        if (INTERVAL_PRESETS[initialIdx].seconds !== initialSeconds)
-            settings.set_int('interval-seconds', INTERVAL_PRESETS[initialIdx].seconds);
+        const makeSpin = (upper, pageIncrement) => new Gtk.SpinButton({
+            adjustment: new Gtk.Adjustment({lower: 0, upper, step_increment: 1, page_increment: pageIncrement}),
+            numeric: true,
+            valign: Gtk.Align.CENTER,
+            width_chars: 2,
+        });
+        const hoursSpin = makeSpin(24, 1);
+        const minutesSpin = makeSpin(59, 5);
+
+        const intervalBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 4,
+            valign: Gtk.Align.CENTER,
+        });
+        intervalBox.append(hoursSpin);
+        intervalBox.append(new Gtk.Label({label: _('h')}));
+        intervalBox.append(minutesSpin);
+        intervalBox.append(new Gtk.Label({label: _('m')}));
+        customRow.add_suffix(intervalBox);
+        group.add(customRow);
+
+        let syncingInterval = false;
+        const loadInterval = () => {
+            const total = settings.get_int('interval-seconds');
+            const presetIdx = presetSeconds.indexOf(total);
+            syncingInterval = true;
+            intervalRow.selected = presetIdx >= 0 ? presetIdx : CUSTOM_INDEX;
+            customRow.visible = presetIdx < 0;
+            hoursSpin.value = Math.floor(total / 3600);
+            minutesSpin.value = Math.round((total % 3600) / 60);
+            syncingInterval = false;
+        };
+        const storeCustom = () => {
+            if (syncingInterval)
+                return;
+            const total = hoursSpin.value * 3600 + minutesSpin.value * 60;
+            settings.set_int('interval-seconds', Math.min(86400, Math.max(60, total)));
+        };
 
         intervalRow.connect('notify::selected', () => {
-            settings.set_int('interval-seconds', INTERVAL_PRESETS[intervalRow.selected].seconds);
+            if (syncingInterval)
+                return;
+            const sel = intervalRow.selected;
+            if (sel === CUSTOM_INDEX) {
+                customRow.visible = true;
+                storeCustom();
+            } else {
+                customRow.visible = false;
+                settings.set_int('interval-seconds', presetSeconds[sel]);
+            }
         });
-        signalIds.push(settings.connect('changed::interval-seconds', () => {
-            const idx = findClosestPresetIndex(settings.get_int('interval-seconds'));
-            if (intervalRow.selected !== idx)
-                intervalRow.selected = idx;
-        }));
-        group.add(intervalRow);
+        hoursSpin.connect('value-changed', storeCustom);
+        minutesSpin.connect('value-changed', storeCustom);
+        signalIds.push(settings.connect('changed::interval-seconds', loadInterval));
+        loadInterval();
 
         const shuffleRow = new Adw.SwitchRow({title: _('Shuffle')});
         settings.bind('random', shuffleRow, 'active', Gio.SettingsBindFlags.DEFAULT);
